@@ -1,0 +1,23 @@
+# Data folder
+data/
+
+# Requirements
+requirements.txt
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environment
+venv/
+ENV/
+
+# PyTorch models (TOO LARGE)
+outputs/*.pth
+*.pth
+
+# macOS
+.DS_Store
+
+# Logs
+*.log

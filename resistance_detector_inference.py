@@ -1,592 +1,762 @@
 """
-Cancer Resistance Detection - Inference Script
-Phase 2: Detecting resistance using MOA prediction mismatch
-
-This script uses the trained MOA classifier to detect drug resistance by comparing
-predicted MOA vs expected MOA for a given drug treatment.
+LUMIMAP - Resistance Detector
+Detects drug resistance by comparing predicted vs expected MOA
+Provides quantitative 0-100% resistance scoring and treatment recommendations
 """
 
+import os
 import torch
-import torch.nn.functional as F
-import numpy as np
+import torch.nn as nn
+from torchvision import models, transforms
 from PIL import Image
+import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
-from pathlib import Path
-import cv2
 import json
 
-# Import from training script
-from moa_classifier_train import MOAClassifier, Config, get_val_transforms
+# Import centralized test configuration
+from test_config import TEST_IMAGE, DRUG_NAME, DRUG_CONCENTRATION, EXPECTED_MOA
 
-# ============================================================================
-# RESISTANCE DETECTOR
-# ============================================================================
+# Import morphology analysis
+from morphology_analyzer import analyze_cell_morphology, classify_resistance_with_morphology
 
-class ResistanceDetector:
-    def __init__(self, model_path, device='cuda'):
-        """
-        Initialize resistance detector with trained MOA classifier
-        
-        Args:
-            model_path: Path to trained model checkpoint
-            device: 'cuda' or 'cpu'
-        """
-        self.device = device
-        self.model = self._load_model(model_path)
-        self.model.eval()
-        self.transform = get_val_transforms()
-        
-        # MOA information
-        self.moa_classes = Config.MOA_CLASSES
-        self.moa_to_idx = {moa: idx for idx, moa in enumerate(self.moa_classes)}
-        
-        # Drug-MOA mapping (from BBBC021 + literature)
-        self.drug_moa_mapping = self._load_drug_database()
+# Import centralized drug database
+from drug_database import DRUG_DATABASE, get_drug_info, list_drugs_by_moa
+
+# ============================================
+# CONFIGURATION
+# ============================================
+
+class Config:
+    """Configuration for resistance detection"""
+    # Image settings
+    IMG_SIZE = 224  # Single integer, not tuple!
     
-    def _load_model(self, model_path):
-        """Load trained model"""
-        print(f"Loading model from {model_path}...")
-        checkpoint = torch.load(model_path, map_location=self.device)
-        
-        model = MOAClassifier(
-            backbone=Config.BACKBONE,
-            num_classes=Config.NUM_CLASSES,
-            pretrained=False
-        )
-        model.load_state_dict(checkpoint['model_state_dict'])
-        model = model.to(self.device)
-        
-        print(f"Model loaded. Best validation accuracy: {checkpoint['best_val_acc']:.4f}")
-        return model
+    # MOA Classes (13 classes from your model)
+    MOA_CLASSES = [
+        'Actin disruptors',
+        'Aurora kinase inhibitors',
+        'Cholesterol-lowering',
+        'DMSO',
+        'DNA damage',
+        'DNA replication',
+        'Eg5 inhibitors',
+        'Kinase inhibitors',
+        'Microtubule destabilizers',
+        'Microtubule stabilizers',
+        'PKC activators',
+        'Protein degradation',
+        'Protein synthesis'
+    ]
     
-    def _load_drug_database(self):
-        """
-        Load drug-MOA mapping
-        In production, this would come from a comprehensive database
-        """
-        # Example mapping based on BBBC021 compounds
-        return {
-            'cytochalasin B': 'Actin disruptors',
-            'latrunculin B': 'Actin disruptors',
-            'barasertib': 'Aurora kinase inhibitors',
-            'paclitaxel': 'Microtubule stabilizers',
-            'taxol': 'Microtubule stabilizers',
-            'nocodazole': 'Microtubule destabilizers',
-            'colchicine': 'Microtubule destabilizers',
-            'monastrol': 'Eg5 inhibitors',
-            'doxorubicin': 'DNA damage',
-            'etoposide': 'DNA damage',
-            'cisplatin': 'DNA damage',
-            'camptothecin': 'DNA damage',
-            'hydroxyurea': 'DNA replication',
-            'atorvastatin': 'Cholesterol-lowering',
-            'bortezomib': 'Protein degradation',
-            'MG132': 'Protein degradation',
-            'emetine': 'Protein synthesis',
-            'cycloheximide': 'Protein synthesis',
-            # Add more as needed
-        }
+    NUM_CLASSES = len(MOA_CLASSES)
     
-    def load_image(self, image_path):
-        """
-        Load and preprocess microscopy image
-        
-        Args:
-            image_path: Path to image file (or tuple of 3 paths for DAPI, Tubulin, Actin)
-        
-        Returns:
-            Preprocessed image tensor
-        """
-        if isinstance(image_path, (tuple, list)):
-            # Load 3 separate channel files
-            channels = []
-            for path in image_path:
-                img = np.array(Image.open(path))
-                channels.append(img)
-            image = np.stack(channels, axis=-1)
-        else:
-            # Single 3-channel image
-            image = np.array(Image.open(image_path))
-            if image.ndim == 2:
-                # Grayscale - replicate to 3 channels
-                image = np.stack([image] * 3, axis=-1)
-        
-        # Normalize
-        image = self._normalize_image(image)
-        
-        # Apply transforms
-        if self.transform:
-            transformed = self.transform(image=image)
-            image_tensor = transformed['image'].unsqueeze(0)  # Add batch dimension
-        
-        return image_tensor
+    # Device
+    DEVICE = torch.device('mps' if torch.backends.mps.is_available() else 
+                         'cuda' if torch.cuda.is_available() else 'cpu')
     
-    def _normalize_image(self, image):
-        """Normalize image to 0-255 range"""
-        image = image.astype(np.float32)
-        for c in range(3):
-            channel = image[:, :, c]
-            channel_min = channel.min()
-            channel_max = channel.max()
-            if channel_max > channel_min:
-                image[:, :, c] = 255 * (channel - channel_min) / (channel_max - channel_min)
-        return image.astype(np.uint8)
+    OUTPUT_DIR = './outputs'
+
+# ============================================
+# DRUG DATABASE
+# ============================================
+# Now imported from centralized drug_database.py
+# Contains ~70 drugs organized by MOA class
+# To add custom drugs: use drug_database.add_custom_drug()
+
+ALTERNATIVE_DRUGS = {
+    'Actin disruptors': [
+        ('cisplatin', 'DNA damage'),
+        ('paclitaxel', 'Microtubule stabilizers'),
+        ('doxorubicin', 'DNA damage'),
+        ('gemcitabine', 'DNA replication'),
+        ('bortezomib', 'Protein degradation')
+    ],
+    'Microtubule stabilizers': [
+        ('doxorubicin', 'DNA damage'),
+        ('cisplatin', 'DNA damage'),
+        ('gemcitabine', 'DNA replication'),
+        ('cytarabine', 'DNA replication'),
+        ('bortezomib', 'Protein degradation')
+    ],
+    'DNA damage': [
+        ('paclitaxel', 'Microtubule stabilizers'),
+        ('vincristine', 'Microtubule destabilizers'),
+        ('bortezomib', 'Protein degradation'),
+        ('cytarabine', 'DNA replication'),
+        ('monastrol', 'Eg5 inhibitors')
+    ],
+    'DMSO': [
+        ('paclitaxel', 'Microtubule stabilizers'),
+        ('doxorubicin', 'DNA damage'),
+        ('cytochalasin B', 'Actin disruptors'),
+        ('nocodazole', 'Microtubule destabilizers'),
+        ('bortezomib', 'Protein degradation')
+    ]
+}
+
+# ============================================
+# MODEL LOADING
+# ============================================
+
+def load_model(model_path):
+    """Load trained model - handles checkpoint architecture automatically"""
+    import sys
     
-    def predict_moa(self, image_tensor):
-        """
-        Predict MOA from image
+    # Check what's in the checkpoint first
+    checkpoint = torch.load(model_path, map_location=Config.DEVICE)
+    
+    print(f"  Checkpoint info:")
+    print(f"    Keys: {list(checkpoint.keys())}")
+    
+    # Try different possible validation accuracy keys
+    val_acc = checkpoint.get('val_acc') or checkpoint.get('best_val_acc') or checkpoint.get('accuracy')
+    if val_acc and isinstance(val_acc, (int, float)):
+        print(f"    Val accuracy: {val_acc:.4f}")
+    else:
+        print(f"    Val accuracy: {val_acc if val_acc else 'Not found'}")
+    
+    # Check if it's the new format (with backbone/classifier) or old format
+    state_dict = checkpoint['model_state_dict']
+    first_key = list(state_dict.keys())[0]
+    
+    if 'backbone' in first_key:
+        print(f"  Detected WRAPPED model (backbone + classifier)")
         
-        Returns:
-            dict with predicted_moa, confidence, and full probability distribution
-        """
-        with torch.no_grad():
-            image_tensor = image_tensor.to(self.device)
-            logits = self.model(image_tensor)
-            probs = F.softmax(logits, dim=1)[0]  # Get probabilities
+        # This is the wrapped model
+        # backbone is a direct ResNet-50 model (not Sequential)
+        class MOAClassifierModel(nn.Module):
+            def __init__(self, num_classes=13):
+                super().__init__()
+                # Create full ResNet-50 as backbone
+                self.backbone = models.resnet50(pretrained=False)
+                
+                # Remove the fc layer from backbone
+                self.backbone.fc = nn.Identity()
+                
+                # Custom classifier
+                self.classifier = nn.Sequential(
+                    nn.Linear(2048, 512),
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                    nn.Linear(512, 256),
+                    nn.ReLU(),
+                    nn.Dropout(0.3),
+                    nn.Linear(256, num_classes)
+                )
+            
+            def forward(self, x):
+                x = self.backbone(x)
+                x = self.classifier(x)
+                return x
         
-        # Get top prediction
-        top_prob, top_idx = probs.max(0)
-        predicted_moa = self.moa_classes[top_idx.item()]
-        confidence = top_prob.item()
+        # Get num classes from checkpoint
+        num_classes = state_dict['classifier.6.weight'].shape[0]
+        print(f"    Num classes in checkpoint: {num_classes}")
         
-        # Get top-3 predictions
-        top3_probs, top3_indices = probs.topk(3)
-        top3 = [
-            {'moa': self.moa_classes[idx.item()], 'probability': prob.item()}
-            for prob, idx in zip(top3_probs, top3_indices)
+        # ALWAYS use the correct 13-class list for this model
+        CORRECT_13_CLASSES = [
+            'Actin disruptors',
+            'Aurora kinase inhibitors',
+            'Cholesterol-lowering',
+            'DMSO',
+            'DNA damage',
+            'DNA replication',
+            'Eg5 inhibitors',
+            'Kinase inhibitors',
+            'Microtubule destabilizers',
+            'Microtubule stabilizers',
+            'PKC activators',
+            'Protein degradation',
+            'Protein synthesis'
         ]
         
-        return {
-            'predicted_moa': predicted_moa,
-            'confidence': confidence,
-            'top3': top3,
-            'all_probabilities': probs.cpu().numpy()
-        }
-    
-    def detect_resistance(self, image_path, drug_info):
-        """
-        Main resistance detection function
+        if num_classes == 13:
+            Config.MOA_CLASSES = CORRECT_13_CLASSES
+            Config.NUM_CLASSES = 13
+            print(f"  ✓ Using correct 13-class MOA list")
         
-        Args:
-            image_path: Path to microscopy image(s)
-            drug_info: Dict with keys:
-                - 'name': Drug name
-                - 'expected_moa': Expected MOA (optional, will look up if not provided)
-                - 'concentration': Drug concentration in nM (optional)
+        model = MOAClassifierModel(num_classes=num_classes)
         
-        Returns:
-            Comprehensive resistance analysis
-        """
-        # Load image
-        image_tensor = self.load_image(image_path)
+        # Try loading - use strict=False to see what's missing
+        try:
+            model.load_state_dict(state_dict, strict=True)
+            print(f"  ✓ Loaded with strict=True")
+        except RuntimeError as e:
+            print(f"  ⚠️ Strict loading failed, trying strict=False...")
+            missing, unexpected = model.load_state_dict(state_dict, strict=False)
+            if missing:
+                print(f"  Missing keys (first 5): {list(missing)[:5]}")
+            if unexpected:
+                print(f"  Unexpected keys (first 5): {list(unexpected)[:5]}")
+            print(f"  ⚠️ Loaded with strict=False (some keys may not match)")
         
-        # Get MOA prediction
-        prediction = self.predict_moa(image_tensor)
-        predicted_moa = prediction['predicted_moa']
+    else:
+        print(f"  Detected STANDARD model (direct ResNet)")
         
-        # Determine expected MOA
-        if 'expected_moa' in drug_info:
-            expected_moa = drug_info['expected_moa']
-        else:
-            drug_name = drug_info['name'].lower()
-            expected_moa = self.drug_moa_mapping.get(drug_name, 'Unknown')
+        # Standard ResNet-50 model
+        try:
+            from torchvision.models import ResNet50_Weights
+            model = models.resnet50(weights=None)
+        except ImportError:
+            model = models.resnet50(pretrained=False)
         
-        # Calculate resistance score
-        if expected_moa in self.moa_to_idx:
-            expected_moa_idx = self.moa_to_idx[expected_moa]
-            expected_moa_prob = prediction['all_probabilities'][expected_moa_idx]
-        else:
-            expected_moa_prob = 0.0
-        
-        # Resistance score = 1 - probability of expected MOA
-        resistance_score = 1.0 - expected_moa_prob
-        
-        # Classify resistance type
-        resistance_type, explanation = self._classify_resistance_type(
-            predicted_moa, expected_moa, resistance_score
+        num_features = model.fc.in_features
+        model.fc = nn.Sequential(
+            nn.Dropout(0.5),
+            nn.Linear(num_features, 512),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, Config.NUM_CLASSES)
         )
         
-        # Determine if resistant (threshold = 0.5)
-        is_resistant = resistance_score > 0.5
-        
-        result = {
-            'is_resistant': is_resistant,
-            'resistance_score': float(resistance_score),
-            'resistance_type': resistance_type,
-            'predicted_moa': predicted_moa,
-            'expected_moa': expected_moa,
-            'prediction_confidence': prediction['confidence'],
-            'expected_moa_probability': float(expected_moa_prob),
-            'top3_predictions': prediction['top3'],
-            'explanation': explanation,
-            'drug_info': drug_info
-        }
-        
-        return result
+        model.load_state_dict(state_dict, strict=False)
     
-    def _classify_resistance_type(self, predicted_moa, expected_moa, resistance_score):
-        """Classify the type of resistance"""
+    model.to(Config.DEVICE)
+    model.eval()
+    
+    print(f"✓ Model loaded!")
+    print(f"  Active MOA classes ({len(Config.MOA_CLASSES)}): {Config.MOA_CLASSES[:3]}...{Config.MOA_CLASSES[-1]}")
+    
+    return model
+
+# ============================================
+# IMAGE PREPROCESSING
+# ============================================
+
+def preprocess_image(image_path):
+    """Preprocess image for model input"""
+    # Load image - handle TIFF files specially
+    if image_path.endswith('.tif') or image_path.endswith('.tiff'):
+        # TIFF files can be multi-channel, need special handling
+        image = Image.open(image_path)
         
-        if resistance_score < 0.3:
-            return 'sensitive', 'Cells show normal drug response'
+        # Convert to numpy array first
+        image_array = np.array(image)
         
-        elif resistance_score < 0.5:
-            return 'partial_resistance', 'Cells show weakened but detectable drug response'
+        # Handle different bit depths
+        if image_array.dtype in [np.uint16, np.int16, np.float32, np.float64]:
+            # Normalize to 8-bit
+            image_array = ((image_array - image_array.min()) / 
+                          (image_array.max() - image_array.min()) * 255).astype(np.uint8)
         
-        elif predicted_moa == expected_moa:
-            # High resistance score but predicted correct MOA?
-            # This means low confidence in prediction
-            return 'uncertain', 'Unclear morphology - may need higher dose or longer treatment'
+        # Ensure RGB (3 channels)
+        if len(image_array.shape) == 2:  # Grayscale
+            image_array = np.stack([image_array] * 3, axis=-1)
+        elif image_array.shape[2] > 3:  # More than 3 channels
+            image_array = image_array[:, :, :3]
         
-        else:
-            # Different MOA predicted
-            if 'DMSO' in predicted_moa or resistance_score > 0.8:
-                return 'complete_resistance', \
-                       'Cells appear untreated - likely efflux pump or target mutation'
+        # Ensure uint8 type for cv2
+        if image_array.dtype != np.uint8:
+            image_array = image_array.astype(np.uint8)
+        
+        # Make contiguous for cv2
+        image_array = np.ascontiguousarray(image_array)
+        
+        # CRITICAL: Model was trained on 224x224 images, ALWAYS use this size!
+        TARGET_SIZE = 224
+        print(f"  Resizing to {TARGET_SIZE}×{TARGET_SIZE} (model training size)")
+        
+        # Resize using cv2 if available, otherwise scipy
+        try:
+            import cv2
+            image_array = cv2.resize(image_array, (TARGET_SIZE, TARGET_SIZE), 
+                                    interpolation=cv2.INTER_LINEAR)
+        except ImportError:
+            # Fallback to scipy
+            from scipy.ndimage import zoom
+            h, w = image_array.shape[:2]
+            TARGET_SIZE = 224
+            zoom_h = TARGET_SIZE / h
+            zoom_w = TARGET_SIZE / w
+            if len(image_array.shape) == 3:
+                image_array = zoom(image_array, (zoom_h, zoom_w, 1), order=1)
             else:
-                return 'cross_resistance', \
-                       f'Cells activated alternative {predicted_moa} pathway'
+                image_array = zoom(image_array, (zoom_h, zoom_w), order=1)
+        
+        # Convert back to PIL for transforms
+        image = Image.fromarray(image_array.astype(np.uint8))
+        
+    else:
+        # Regular image files - load as numpy array
+        image = Image.open(image_path)
+        image_array = np.array(image)
+        
+        # Ensure RGB
+        if len(image_array.shape) == 2:
+            image_array = np.stack([image_array] * 3, axis=-1)
+        elif image_array.shape[2] == 4:  # RGBA
+            image_array = image_array[:, :, :3]
+        
+        # Ensure uint8
+        if image_array.dtype != np.uint8:
+            image_array = image_array.astype(np.uint8)
+        
+        # Make contiguous
+        image_array = np.ascontiguousarray(image_array)
+        
+        # Resize with cv2
+        try:
+            import cv2
+            # Handle IMG_SIZE whether it's int or tuple
+            if isinstance(Config.IMG_SIZE, (list, tuple)):
+                target_size = (int(Config.IMG_SIZE[0]), int(Config.IMG_SIZE[1]))
+            else:
+                target_size = (int(Config.IMG_SIZE), int(Config.IMG_SIZE))
+            image_array = cv2.resize(image_array, target_size,
+                                    interpolation=cv2.INTER_LINEAR)
+        except ImportError:
+            # Fallback: try PIL one more time with basic parameters
+            image = Image.fromarray(image_array)
+            if isinstance(Config.IMG_SIZE, (list, tuple)):
+                target_size = (int(Config.IMG_SIZE[0]), int(Config.IMG_SIZE[1]))
+            else:
+                target_size = (int(Config.IMG_SIZE), int(Config.IMG_SIZE))
+            image = image.resize(target_size)
+            image_array = np.array(image)
+        
+        # Convert to PIL
+        image = Image.fromarray(image_array.astype(np.uint8))
     
-    def generate_heatmap(self, image_path, drug_info, save_path=None):
-        """
-        Generate Grad-CAM heatmap showing which regions influence prediction
+    # Apply transforms
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    ])
+    
+    image_tensor = transform(image).unsqueeze(0)
+    
+    return image_tensor, image
+
+# ============================================
+# RESISTANCE DETECTION
+# ============================================
+
+def detect_resistance(model, image_path, drug_name, expected_moa=None, concentration=None):
+    """Detect resistance and generate report
+    
+    Args:
+        model: Trained model
+        image_path: Path to cell image
+        drug_name: Name of the drug
+        expected_moa: (Optional) Expected MOA, overrides database lookup
+        concentration: (Optional) Drug concentration, overrides database lookup
+    """
+    
+    # Get drug info from database or use provided values
+    if drug_name in DRUG_DATABASE:
+        drug_info = DRUG_DATABASE[drug_name]
+        if expected_moa is None:
+            expected_moa = drug_info['moa']
+        if concentration is None:
+            concentration = drug_info['concentration']
+    else:
+        # Use provided values if drug not in database
+        if expected_moa is None or concentration is None:
+            raise ValueError(
+                f"Drug '{drug_name}' not in database. "
+                f"Please provide expected_moa and concentration parameters."
+            )
+    
+    # Get expected MOA index
+    expected_moa_idx = Config.MOA_CLASSES.index(expected_moa)
+    
+    # Preprocess image
+    image_tensor, original_image = preprocess_image(image_path)
+    image_tensor = image_tensor.to(Config.DEVICE)
+    
+    # Predict
+    with torch.no_grad():
+        outputs = model(image_tensor)
+        probabilities = torch.softmax(outputs, dim=1)[0]
         
-        This helps explain WHY the AI thinks cells are resistant
-        """
-        from gradcam_explainer import ResistanceExplainer
-        from PIL import Image
-        import numpy as np
+        # DEBUG: Print all predictions
+        print("\n" + "="*70)
+        print("DEBUG - ALL PREDICTIONS (Resistance Detector):")
+        print("="*70)
+        sorted_indices = probabilities.argsort(descending=True)
+        for i in range(len(Config.MOA_CLASSES)):
+            idx = sorted_indices[i]
+            print(f"{i+1:2d}. {Config.MOA_CLASSES[idx]:35s} {probabilities[idx].item()*100:6.2f}%")
+        print("="*70 + "\n")
         
-        # Load image
-        image_tensor = self.load_image(image_path)
-        
-        # Load original for visualization
-        if isinstance(image_path, (tuple, list)):
-            original = np.array(Image.open(image_path[0]))
-        else:
-            original = np.array(Image.open(image_path))
-        
-        if original.ndim == 2:
-            original = np.stack([original]*3, axis=-1)
-        
-        # Normalize for display
-        original = self._normalize_image(original)
-        
-        # Create explainer
-        explainer = ResistanceExplainer(self.moa_predictor)
-        
-        # Generate explanation
-        fig = explainer.explain_prediction(
-            image_tensor,
-            original,
-            drug_info=drug_info,
-            save_path=save_path or 'gradcam_heatmap.png'
+        predicted_idx = probabilities.argmax().item()
+        predicted_moa = Config.MOA_CLASSES[predicted_idx]
+    
+    # Calculate resistance score
+    expected_prob = probabilities[expected_moa_idx].item()
+    resistance_score = (1 - expected_prob) * 100
+    
+    # Analyze cell morphology for more accurate resistance mechanism classification
+    print("Analyzing cell morphology...")
+    morphology_features = analyze_cell_morphology(image_path)
+    print(f"  Morphology type: {morphology_features['morphology_type'].upper()}")
+    print(f"  Elongation: {morphology_features['elongation']:.3f} (0=round, 1=spindle)")
+    print(f"  Circularity: {morphology_features['circularity']:.3f} (1=perfect circle)")
+    print(f"  Confidence: {morphology_features['morphology_confidence']:.1%}\n")
+    
+    # Determine resistance type and mechanism (using morphology features)
+    if resistance_score < 25:
+        resistance_type = "Sensitive"
+        resistance_mechanism = "None - Drug Working"
+        explanation = "Cells show normal drug response with expected morphological changes"
+    elif resistance_score < 75:
+        resistance_type = "Partial Resistance"
+        resistance_mechanism = classify_resistance_mechanism(
+            predicted_moa, expected_moa, resistance_score, "partial", morphology_features
         )
-        
-        return fig
-
-# ============================================================================
-# DRUG RECOMMENDER
-# ============================================================================
-
-class DrugRecommender:
-    def __init__(self):
-        # MOA similarity matrix (can be learned from data or predefined)
-        self.moa_similarity = self._build_moa_similarity_matrix()
-        
-        # Drug database with alternative options
-        self.drug_database = self._load_drug_database()
+        explanation = f"Cells show partial drug response - {resistance_mechanism} developing"
+    else:
+        resistance_type = "Complete Resistance"
+        resistance_mechanism = classify_resistance_mechanism(
+            predicted_moa, expected_moa, resistance_score, "complete", morphology_features
+        )
+        explanation = f"Cells display {resistance_mechanism} - morphological analysis indicates specific resistance pathway"
     
-    def _build_moa_similarity_matrix(self):
-        """
-        Build similarity matrix between MOAs
-        High similarity = drugs likely to show cross-resistance
-        """
-        moas = Config.MOA_CLASSES
-        n = len(moas)
-        similarity = np.eye(n)  # Start with identity
-        
-        # Define similarities (0-1 scale)
-        # Example: microtubule drugs are similar to each other
-        similar_pairs = [
-            ('Microtubule stabilizers', 'Microtubule destabilizers', 0.6),
-            ('DNA damage', 'DNA replication', 0.5),
-            ('Protein degradation', 'Protein synthesis', 0.4),
-            # Add more based on biological knowledge
-        ]
-        
-        moa_to_idx = {moa: i for i, moa in enumerate(moas)}
-        
-        for moa1, moa2, sim in similar_pairs:
-            if moa1 in moa_to_idx and moa2 in moa_to_idx:
-                i, j = moa_to_idx[moa1], moa_to_idx[moa2]
-                similarity[i, j] = sim
-                similarity[j, i] = sim
-        
-        return similarity
+    # Get top 3 predictions
+    top3_probs, top3_indices = probabilities.topk(3)
+    top3_predictions = [
+        (Config.MOA_CLASSES[idx], prob.item())
+        for idx, prob in zip(top3_indices, top3_probs)
+    ]
     
-    def _load_drug_database(self):
-        """Load comprehensive drug database"""
-        # In production, this would be a real database
-        drugs = [
-            {'name': 'cisplatin', 'moa': 'DNA damage', 'mdr1_substrate': False},
-            {'name': 'paclitaxel', 'moa': 'Microtubule stabilizers', 'mdr1_substrate': True},
-            {'name': 'doxorubicin', 'moa': 'DNA damage', 'mdr1_substrate': True},
-            {'name': 'gemcitabine', 'moa': 'DNA replication', 'mdr1_substrate': False},
-            {'name': 'bortezomib', 'moa': 'Protein degradation', 'mdr1_substrate': False},
-            {'name': 'barasertib', 'moa': 'Aurora kinase inhibitors', 'mdr1_substrate': False},
-            {'name': 'monastrol', 'moa': 'Eg5 inhibitors', 'mdr1_substrate': False},
-            # Add more drugs...
-        ]
-        return drugs
+    # Generate recommendations
+    recommendations = get_alternative_drugs(expected_moa, resistance_score)
     
-    def recommend_alternatives(self, resistance_result):
-        """
-        Recommend alternative drugs based on resistance analysis
-        
-        Args:
-            resistance_result: Output from ResistanceDetector.detect_resistance()
-        
-        Returns:
-            List of recommended drugs with rationale
-        """
-        if not resistance_result['is_resistant']:
-            return []  # No alternatives needed
-        
-        failed_moa = resistance_result['expected_moa']
-        resistance_type = resistance_result['resistance_type']
-        
-        recommendations = []
-        
-        if resistance_type == 'complete_resistance':
-            # Try drugs with completely different MOAs
-            for drug in self.drug_database:
-                if drug['moa'] != failed_moa:
-                    # Calculate MOA distance
-                    moa_idx_failed = Config.MOA_CLASSES.index(failed_moa)
-                    moa_idx_candidate = Config.MOA_CLASSES.index(drug['moa'])
-                    similarity = self.moa_similarity[moa_idx_failed, moa_idx_candidate]
-                    score = 1.0 - similarity  # Less similar = better
-                    
-                    recommendations.append({
-                        'drug': drug['name'],
-                        'moa': drug['moa'],
-                        'score': score,
-                        'rationale': f"Different mechanism from {failed_moa}",
-                        'evidence': 'High' if not drug['mdr1_substrate'] else 'Moderate'
-                    })
-        
-        elif resistance_type == 'cross_resistance':
-            # Try drugs from unrelated pathways
-            predicted_moa = resistance_result['predicted_moa']
-            for drug in self.drug_database:
-                if drug['moa'] not in [failed_moa, predicted_moa]:
-                    recommendations.append({
-                        'drug': drug['name'],
-                        'moa': drug['moa'],
-                        'score': 0.7,
-                        'rationale': f"Avoids both {failed_moa} and {predicted_moa} pathways"
-                    })
-        
-        # Sort by score
-        recommendations.sort(key=lambda x: x['score'], reverse=True)
-        
-        return recommendations[:5]  # Top 5
-
-# ============================================================================
-# REPORT GENERATOR
-# ============================================================================
-
-class ResistanceReport:
-    @staticmethod
-    def generate_text_report(resistance_result, recommendations):
-        """Generate human-readable text report"""
-        report = []
-        report.append("="*60)
-        report.append("CANCER RESISTANCE DETECTION REPORT")
-        report.append("="*60)
-        report.append("")
-        
-        # Drug information
-        drug_info = resistance_result['drug_info']
-        report.append(f"Drug: {drug_info['name']}")
-        if 'concentration' in drug_info:
-            report.append(f"Concentration: {drug_info['concentration']} nM")
-        report.append(f"Expected MOA: {resistance_result['expected_moa']}")
-        report.append("")
-        
-        # Resistance status
-        report.append("RESISTANCE STATUS:")
-        report.append("-" * 60)
-        if resistance_result['is_resistant']:
-            report.append(f"⚠️  RESISTANCE DETECTED")
-            report.append(f"   Resistance Score: {resistance_result['resistance_score']:.2%}")
-            report.append(f"   Resistance Type: {resistance_result['resistance_type']}")
-        else:
-            report.append(f"✓  SENSITIVE")
-            report.append(f"   Cells respond normally to drug")
-        report.append("")
-        
-        # MOA analysis
-        report.append("MOA ANALYSIS:")
-        report.append("-" * 60)
-        report.append(f"Predicted MOA: {resistance_result['predicted_moa']}")
-        report.append(f"Confidence: {resistance_result['prediction_confidence']:.2%}")
-        report.append(f"Expected MOA probability: {resistance_result['expected_moa_probability']:.2%}")
-        report.append("")
-        
-        # Top 3 predictions
-        report.append("Top 3 MOA Predictions:")
-        for i, pred in enumerate(resistance_result['top3_predictions'], 1):
-            report.append(f"  {i}. {pred['moa']}: {pred['probability']:.2%}")
-        report.append("")
-        
-        # Explanation
-        report.append("INTERPRETATION:")
-        report.append("-" * 60)
-        report.append(resistance_result['explanation'])
-        report.append("")
-        
-        # Recommendations
-        if recommendations:
-            report.append("RECOMMENDED ALTERNATIVE DRUGS:")
-            report.append("-" * 60)
-            for i, rec in enumerate(recommendations, 1):
-                report.append(f"{i}. {rec['drug']} ({rec['moa']})")
-                report.append(f"   Score: {rec['score']:.2f}")
-                report.append(f"   Rationale: {rec['rationale']}")
-                report.append("")
-        
-        report.append("="*60)
-        
-        return "\n".join(report)
-    
-    @staticmethod
-    def generate_visual_report(resistance_result, recommendations, output_path='report.png'):
-        """Generate visual report with plots"""
-        fig = plt.figure(figsize=(16, 10))
-        gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
-        
-        # 1. Resistance gauge
-        ax1 = fig.add_subplot(gs[0, 0])
-        score = resistance_result['resistance_score']
-        colors = ['green', 'yellow', 'orange', 'red']
-        color = colors[int(score * 3)]
-        ax1.barh(0, score, color=color, height=0.5)
-        ax1.set_xlim(0, 1)
-        ax1.set_ylim(-0.5, 0.5)
-        ax1.set_title(f"Resistance Score: {score:.2%}", fontsize=14, fontweight='bold')
-        ax1.set_xlabel('Score')
-        ax1.axvline(0.5, color='black', linestyle='--', alpha=0.5)
-        ax1.text(0.5, -0.3, 'Threshold', ha='center', fontsize=10)
-        
-        # 2. MOA probability distribution
-        ax2 = fig.add_subplot(gs[0, 1])
-        moa_probs = resistance_result['top3_predictions']
-        moas = [p['moa'] for p in moa_probs]
-        probs = [p['probability'] for p in moa_probs]
-        bars = ax2.barh(moas, probs)
-        # Highlight expected MOA
-        expected_idx = next((i for i, m in enumerate(moas) 
-                           if m == resistance_result['expected_moa']), None)
-        if expected_idx is not None:
-            bars[expected_idx].set_color('red')
-        ax2.set_xlabel('Probability')
-        ax2.set_title('Top 3 MOA Predictions', fontsize=14, fontweight='bold')
-        
-        # 3. Resistance type
-        ax3 = fig.add_subplot(gs[1, :])
-        ax3.axis('off')
-        resistance_info = f"""
-        Drug: {resistance_result['drug_info']['name']}
-        Expected MOA: {resistance_result['expected_moa']}
-        Predicted MOA: {resistance_result['predicted_moa']}
-        
-        Resistance Type: {resistance_result['resistance_type'].replace('_', ' ').title()}
-        
-        Explanation:
-        {resistance_result['explanation']}
-        """
-        ax3.text(0.1, 0.5, resistance_info, fontsize=12, verticalalignment='center',
-                family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
-        
-        # 4. Recommendations
-        ax4 = fig.add_subplot(gs[2, :])
-        ax4.axis('off')
-        if recommendations:
-            rec_text = "RECOMMENDED ALTERNATIVES:\n\n"
-            for i, rec in enumerate(recommendations[:3], 1):
-                rec_text += f"{i}. {rec['drug']} ({rec['moa']})\n"
-                rec_text += f"   Rationale: {rec['rationale']}\n\n"
-        else:
-            rec_text = "Cells are sensitive - no alternative drugs needed"
-        
-        ax4.text(0.1, 0.5, rec_text, fontsize=11, verticalalignment='center',
-                family='monospace', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.3))
-        
-        plt.savefig(output_path, dpi=150, bbox_inches='tight')
-        print(f"Visual report saved to {output_path}")
-        return output_path
-
-# ============================================================================
-# MAIN INFERENCE SCRIPT
-# ============================================================================
-
-def main():
-    # Initialize detector
-    detector = ResistanceDetector(
-        model_path='./outputs/best_model.pth',
-        device='cuda' if torch.cuda.is_available() else 'cpu'
-    )
-    
-    # Initialize recommender
-    recommender = DrugRecommender()
-    
-    # Example usage
-    print("\n" + "="*60)
-    print("Cancer Resistance Detection System")
-    print("="*60 + "\n")
-    
-    # Test image (replace with your actual image path)
-    image_path = 'data/Week1/Week1_22161/Week1_150607_B02_s3_w1FE9E7681-E7DA-4BE8-B72E-66489E8726BE.tif'
-    
-    # Use an actual image from your data folder
-    
-    # Or for 3 separate channel files:
-    # image_path = (
-    #     'Week1_150607_B04_s2_w1_DAPI.tif',
-    #     'Week1_150607_B04_s2_w2_Tubulin.tif',
-    #     'Week1_150607_B04_s2_w4_Actin.tif'
-    # )
-    
-    # Drug information
-    drug_info = {
-        'name': 'cytochalasin B',
-        'expected_moa': 'Actin disruptors',
-        'concentration': 10  # nM
+    # Create report
+    report = {
+        'drug': drug_name,
+        'concentration': concentration,
+        'expected_moa': expected_moa,
+        'predicted_moa': predicted_moa,
+        'predicted_confidence': probabilities[predicted_idx].item(),
+        'expected_moa_probability': expected_prob,
+        'resistance_score': resistance_score,
+        'resistance_type': resistance_type,
+        'resistance_mechanism': resistance_mechanism,
+        'explanation': explanation,
+        'top3_predictions': top3_predictions,
+        'recommendations': recommendations,
+        'morphology_features': morphology_features  # Include morphology analysis
     }
     
-    # Detect resistance
-    print("Analyzing image...")
-    result = detector.detect_resistance(image_path, drug_info)
+    return report
+
+def get_alternative_drugs(expected_moa, resistance_score):
+    """Get alternative drug recommendations"""
+    if resistance_score < 25:
+        return []
     
-    # Get recommendations if resistant
-    recommendations = recommender.recommend_alternatives(result)
+    alternatives = ALTERNATIVE_DRUGS.get(expected_moa, [])
     
-    # Generate reports
-    print("\n" + ResistanceReport.generate_text_report(result, recommendations))
+    recommendations = []
+    for drug, moa in alternatives:
+        recommendations.append({
+            'drug': drug,
+            'moa': moa,
+            'score': 1.0,
+            'rationale': f"Different mechanism from {expected_moa}"
+        })
     
-    # Visual report
-    ResistanceReport.generate_visual_report(result, recommendations, 'resistance_report.png')
+    return recommendations[:5]
+
+def classify_resistance_mechanism(predicted_moa, expected_moa, resistance_score, severity, morphology_features=None):
+    """
+    Classify specific resistance mechanism based on morphological patterns
+    Maps predicted MOA to biological resistance types
     
-    # # Save JSON
-    # with open('resistance_result.json', 'w') as f:
-    #     # Convert numpy types to Python types for JSON serialization
-    #     result_json = {k: float(v) if isinstance(v, np.floating) else v 
-    #                   for k, v in result.items()}
-    #     json.dump({'result': result_json, 'recommendations': recommendations}, f, indent=2)
-    # print("\nResults saved to resistance_result.json")
+    Args:
+        predicted_moa: Predicted MOA from model
+        expected_moa: Expected MOA from drug
+        resistance_score: Resistance score (0-100)
+        severity: "partial" or "complete"
+        morphology_features: (Optional) Dict from analyze_cell_morphology()
+    """
+    
+    # Map MOA predictions to resistance mechanisms based on morphological features
+    
+    # Drug Efflux: Cells appear completely untreated (DMSO-like)
+    if predicted_moa == 'DMSO':
+        if severity == "complete":
+            return "Drug Efflux Resistance (P-glycoprotein overexpression)"
+        else:
+            return "Early Drug Efflux (increased membrane transporter activity)"
+    
+    # Apoptosis Resistance: Shows DNA damage but cells don't die
+    elif predicted_moa == 'DNA damage' and expected_moa != 'DNA damage':
+        if severity == "complete":
+            return "Apoptosis Pathway Resistance (Bcl-2 family dysregulation)"
+        else:
+            return "Emerging Apoptosis Resistance (mitochondrial dysfunction)"
+    
+    # Metabolic Rewiring: Unexpected metabolic/replication patterns
+    elif predicted_moa == 'DNA replication' and expected_moa != 'DNA replication':
+        if severity == "complete":
+            return "Metabolic Rewiring Resistance (altered energy metabolism)"
+        else:
+            return "Metabolic Adaptation (mitochondrial compensation)"
+    
+    # Protein degradation pathway resistance
+    elif predicted_moa == 'Protein degradation' and expected_moa != 'Protein degradation':
+        if severity == "complete":
+            return "Protein Degradation Pathway Resistance (proteasome dysregulation)"
+        else:
+            return "Protein Homeostasis Alteration (UPR activation)"
+    
+    # Cytoskeletal resistance: Check ACTUAL morphology if available
+    elif predicted_moa in ['Actin disruptors', 'Microtubule destabilizers', 'Microtubule stabilizers']:
+        if predicted_moa != expected_moa:
+            # Use morphology features if available
+            if morphology_features:
+                morph_type = morphology_features.get('morphology_type', 'unknown')
+                
+                if morph_type == 'mesenchymal':
+                    # True EMT - cells are spindle-shaped
+                    if severity == "complete":
+                        return "EMT-like Resistance (cytoskeletal reorganization - mesenchymal)"
+                    else:
+                        return "Early EMT Transition (cytoskeletal plasticity)"
+                        
+                elif morph_type == 'epithelial':
+                    # Epithelial resistance - cells stay round
+                    if severity == "complete":
+                        return "Epithelial Resistance (maintaining epithelial phenotype)"
+                    else:
+                        return "Epithelial Adaptation (cytoskeletal compensation)"
+                        
+                else:  # intermediate
+                    if severity == "complete":
+                        return "Cytoskeletal Remodeling Resistance (transitional state)"
+                    else:
+                        return "Cytoskeletal Plasticity (adaptive remodeling)"
+            else:
+                # Fallback if no morphology data
+                if severity == "complete":
+                    return "Cytoskeletal Resistance (EMT-like pattern - needs morphology validation)"
+                else:
+                    return "Cytoskeletal Plasticity (adaptive remodeling)"
+    
+    # Targeted therapy resistance: Eg5, Aurora kinase pathways
+    elif predicted_moa in ['Eg5 inhibitors', 'Aurora kinase inhibitors']:
+        if predicted_moa != expected_moa:
+            if severity == "complete":
+                return "Targeted Therapy Resistance (compensatory pathway activation)"
+            else:
+                return "Pathway Compensation (kinase network rewiring)"
+    
+    # ncRNA-mediated resistance: Protein synthesis changes
+    elif predicted_moa == 'Protein synthesis' and expected_moa != 'Protein synthesis':
+        if severity == "complete":
+            return "ncRNA-mediated Resistance (altered gene expression)"
+        else:
+            return "Translational Reprogramming (ribosome modification)"
+    
+    # Endocrine/Hormone resistance (if applicable)
+    elif 'DMSO' in predicted_moa and resistance_score > 80:
+        return "Hormone Receptor Resistance (signaling pathway bypass)"
+    
+    # Generic resistance if no specific pattern matches
+    else:
+        if severity == "complete":
+            return "Multi-mechanism Resistance (target mutation or efflux pump)"
+        else:
+            return "Developing Resistance (multiple pathways)"
+
+# ============================================
+# VISUALIZATION
+# ============================================
+
+def visualize_resistance_report(report, save_path='resistance_report.png'):
+    """Create visual resistance report"""
+    # Taller figure to accommodate morphology info
+    fig = plt.figure(figsize=(14, 10))
+    gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3, height_ratios=[1, 1, 1.5])
+    
+    # Resistance score gauge
+    ax1 = fig.add_subplot(gs[0, 0])
+    plot_resistance_gauge(ax1, report['resistance_score'])
+    
+    # Top 3 MOA predictions
+    ax2 = fig.add_subplot(gs[0, 1])
+    plot_top3_predictions(ax2, report['top3_predictions'])
+    
+    # Summary text - now spans bottom section with more height
+    ax3 = fig.add_subplot(gs[1:, :])
+    plot_summary_text(ax3, report)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Visual report saved to {save_path}")
+
+def plot_resistance_gauge(ax, resistance_score):
+    """Plot resistance score gauge"""
+    # Determine color
+    if resistance_score < 25:
+        color = 'green'
+    elif resistance_score < 75:
+        color = 'orange'
+    else:
+        color = 'red'
+    
+    ax.barh(0, resistance_score/100, height=0.3, color=color, alpha=0.7)
+    ax.axvline(x=0.5, color='gray', linestyle='--', linewidth=1, label='Threshold')
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.5, 0.5)
+    ax.set_xlabel('Score')
+    ax.set_title(f'Resistance Score: {resistance_score:.2f}%', fontweight='bold')
+    ax.set_yticks([])
+    ax.grid(axis='x', alpha=0.3)
+
+def plot_top3_predictions(ax, top3_predictions):
+    """Plot top 3 MOA predictions"""
+    moas = [pred[0] for pred in top3_predictions]
+    probs = [pred[1] for pred in top3_predictions]
+    
+    colors = ['red' if i == 0 else 'blue' for i in range(len(moas))]
+    ax.barh(moas, probs, color=colors, alpha=0.7)
+    ax.set_xlabel('Probability')
+    ax.set_title('Top 3 MOA Predictions', fontweight='bold')
+    ax.set_xlim(0, 1)
+    ax.grid(axis='x', alpha=0.3)
+
+def plot_summary_text(ax, report):
+    """Plot summary text box - unified layout"""
+    ax.axis('off')
+    
+    # Build complete summary in one organized block
+    summary_lines = [
+        f"Drug: {report['drug']}",
+        f"Expected MOA: {report['expected_moa']}",
+        f"Predicted MOA: {report['predicted_moa']}",
+        "",
+        f"Resistance Type: {report['resistance_type']}",
+        f"Resistance Mechanism: {report['resistance_mechanism']}",
+    ]
+    
+    # Add morphology if available
+    if 'morphology_features' in report and report['morphology_features']:
+        morph = report['morphology_features']
+        summary_lines.extend([
+            "",
+            "Morphology Analysis:",
+            f"  Type: {morph['morphology_type'].upper()}",
+            f"  Elongation: {morph['elongation']:.2f} (0=round, 1=spindle)",
+            f"  Circularity: {morph['circularity']:.2f} (1=perfect circle)",
+        ])
+    
+    # Add explanation
+    summary_lines.extend([
+        "",
+        "Explanation:",
+        f"{report['explanation']}"
+    ])
+    
+    # Add recommendations
+    if report['recommendations']:
+        summary_lines.extend([
+            "",
+            "RECOMMENDED ALTERNATIVES:",
+        ])
+        for i, rec in enumerate(report['recommendations'][:3], 1):
+            summary_lines.append(f"{i}. {rec['drug']} ({rec['moa']})")
+            summary_lines.append(f"   Rationale: {rec['rationale']}")
+    
+    # Join all lines
+    summary_text = "\n".join(summary_lines)
+    
+    # Single text box with better positioning
+    ax.text(0.05, 0.98, summary_text, 
+            transform=ax.transAxes,
+            fontsize=9,
+            verticalalignment='top',
+            fontfamily='monospace',
+            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
+
+# ============================================
+# MAIN
+# ============================================
+
+def main():
+    print("=" * 60)
+    print("Cancer Resistance Detection System")
+    print("=" * 60)
+    
+    # Load model
+    model_path = './outputs/best_model.pth'
+    print(f"Loading model from {model_path}...")
+    model = load_model(model_path)
+    
+    # Test image (configured in test_config.py)
+    test_image = TEST_IMAGE
+    test_drug = DRUG_NAME
+    
+    print(f"✓ Using test configuration:")
+    print(f"  Image: {os.path.basename(test_image)}")
+    print(f"  Drug: {test_drug} ({DRUG_CONCENTRATION})")
+    print(f"  Expected MOA: {EXPECTED_MOA}")
+    
+    print(f"\nAnalyzing image...")
+    
+    # Detect resistance (using values from test_config.py)
+    report = detect_resistance(
+        model, 
+        test_image, 
+        test_drug,
+        expected_moa=EXPECTED_MOA,
+        concentration=DRUG_CONCENTRATION
+    )
+    
+    # Print report
+    print("\n" + "=" * 60)
+    print("CANCER RESISTANCE DETECTION REPORT")
+    print("=" * 60)
+    print(f"Drug: {report['drug']}")
+    print(f"Concentration: {report['concentration']}")
+    print(f"Expected MOA: {report['expected_moa']}")
+    
+    print("\nRESISTANCE STATUS:")
+    print("-" * 60)
+    if report['resistance_score'] >= 25:
+        print("⚠️  RESISTANCE DETECTED")
+    else:
+        print("✓ SENSITIVE")
+    print(f"   Resistance Score: {report['resistance_score']:.2f}%")
+    print(f"   Resistance Type: {report['resistance_type']}")
+    print(f"   Mechanism: {report['resistance_mechanism']}")
+    
+    print("\nMOA ANALYSIS:")
+    print("-" * 60)
+    print(f"Predicted MOA: {report['predicted_moa']}")
+    print(f"Confidence: {report['predicted_confidence']*100:.2f}%")
+    print(f"Expected MOA probability: {report['expected_moa_probability']*100:.2f}%")
+    
+    print("\nTop 3 MOA Predictions:")
+    for i, (moa, prob) in enumerate(report['top3_predictions'], 1):
+        print(f"  {i}. {moa}: {prob*100:.2f}%")
+    
+    print("\nINTERPRETATION:")
+    print("-" * 60)
+    print(report['explanation'])
+    
+    if report['recommendations']:
+        print("\nRECOMMENDED ALTERNATIVE DRUGS:")
+        print("-" * 60)
+        for i, rec in enumerate(report['recommendations'], 1):
+            print(f"{i}. {rec['drug']} ({rec['moa']})")
+            print(f"   Score: {rec['score']:.2f}")
+            print(f"   Rationale: {rec['rationale']}")
+    
+    print("\n" + "=" * 60)
+    
+    # Save visual report
+    visualize_resistance_report(report)
+    
+    # Save JSON report
+    report_serializable = {k: (v.tolist() if isinstance(v, np.ndarray) else 
+                              bool(v) if isinstance(v, np.bool_) else v)
+                          for k, v in report.items()}
+    
+    with open('resistance_report.json', 'w') as f:
+        json.dump(report_serializable, f, indent=2)
+    print("JSON report saved to resistance_report.json")
 
 if __name__ == '__main__':
     main()

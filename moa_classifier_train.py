@@ -54,7 +54,7 @@ class Config:
         'DNA damage',
         'DNA replication',
         'Eg5 inhibitors',
-        'Epithelial',
+        'Kinase inhibitors',
         'Kinase inhibitors',
         'Microtubule destabilizers',
         'Microtubule stabilizers',

@@ -1,0 +1,52 @@
+{
+  "image_name": "Week1_150607_E05_s1_w2A7C68531-5D25-46A7-9FF1-BB3C4A50DF70.tif",
+  "image_path": "input/Week1_150607_E05_s1_w2A7C68531-5D25-46A7-9FF1-BB3C4A50DF70.tif",
+  "drug_name": "cytochalasin B",
+  "drug_concentration": "10 nM",
+  "expected_moa": "Actin disruptors",
+  "predicted_moa": "Microtubule stabilizers",
+  "predicted_prob": 0.9976428151130676,
+  "expected_prob": 2.652277260040137e-07,
+  "resistance_score": 0.9976425498853416,
+  "resistance_type": "Complete Resistance",
+  "top3": [
+    [
+      "Microtubule stabilizers",
+      0.9976428151130676
+    ],
+    [
+      "DMSO",
+      0.002350621623918414
+    ],
+    [
+      "DNA replication",
+      4.77284493172192e-06
+    ]
+  ],
+  "alternatives": [
+    {
+      "drug": "paclitaxel",
+      "moa": "Microtubule stabilizers",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "DMSO",
+      "moa": "DMSO",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "hydroxyurea",
+      "moa": "DNA replication",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "PMA",
+      "moa": "PKC activators",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    }
+  ]
+}

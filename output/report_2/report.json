@@ -1,0 +1,52 @@
+{
+  "image_name": "Week8_4sites_F02_s4_w187C3F806-1938-4CBB-A535-C5E54A3A94BE.tif",
+  "image_path": "input/Week8_4sites_F02_s4_w187C3F806-1938-4CBB-A535-C5E54A3A94BE.tif",
+  "drug_name": "cytochalasin B",
+  "drug_concentration": "10 nM",
+  "expected_moa": "Actin disruptors",
+  "predicted_moa": "Microtubule stabilizers",
+  "predicted_prob": 0.6259765625,
+  "expected_prob": 0.0019178898073732853,
+  "resistance_score": 0.6240586726926267,
+  "resistance_type": "Partial Resistance",
+  "top3": [
+    [
+      "Microtubule stabilizers",
+      0.6259765625
+    ],
+    [
+      "PKC activators",
+      0.3581206202507019
+    ],
+    [
+      "Protein degradation",
+      0.010611778125166893
+    ]
+  ],
+  "alternatives": [
+    {
+      "drug": "paclitaxel",
+      "moa": "Microtubule stabilizers",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "PMA",
+      "moa": "PKC activators",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "bortezomib",
+      "moa": "Protein degradation",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "monastrol",
+      "moa": "Eg5 inhibitors",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    }
+  ]
+}

@@ -45,6 +45,17 @@ st.markdown("""
     border-bottom: 3px solid #1e40af;
     text-transform: uppercase; letter-spacing: 1px;
 }
+.section-title span.step-num {
+    display: inline-block;
+    background: #1e40af;
+    color: white;
+    border-radius: 50%;
+    width: 1.8rem; height: 1.8rem;
+    line-height: 1.8rem;
+    text-align: center;
+    font-size: 0.95rem;
+    margin-right: 0.6rem;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -375,18 +386,29 @@ def create_full_figure(r):
 
 
 # ─────────────────────────────────────────────────────────
-# APP
+# LOGO LOADER
 # ─────────────────────────────────────────────────────────
+import base64, os
+
+def _logo_b64():
+    logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+    if os.path.exists(logo_path):
+        with open(logo_path, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    return ""   # fallback: no image, just title text
+
+
 st.markdown("""
 <div class="header">
-    <h1>🔬 LUMIMAP</h1>
+    <img src="data:image/png;base64,{LOGO_B64}" style="height:110px; margin-bottom:0.8rem;" />
+    <h1>THE LUMI MAP</h1>
     <p>AI-Powered Cancer Drug Resistance Detection from Cell Microscopy Images</p>
     <div class="badge">Harshini Dasari &amp; Ashwini Chandrashekaran</div>
 </div>
-""", unsafe_allow_html=True)
+""".format(LOGO_B64=_logo_b64()), unsafe_allow_html=True)
 
 # Drug info
-st.markdown('<div class="section-title">💊 Drug Information</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title"><span class="step-num">1</span> Drug Information</div>', unsafe_allow_html=True)
 col1, col2, col3 = st.columns([2, 2, 1.5])
 with col1:
     drug = st.selectbox("Drug Name", list(DRUGS_AND_MOAS.keys()))
@@ -398,7 +420,7 @@ with col3:
     conc = st.slider("Concentration (µM)", 0.001, 10.0, 1.0, 0.001)
 
 # Upload — ONE image
-st.markdown('<div class="section-title">📤 Upload Cell Image</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-title"><span class="step-num">2</span> Upload Cell Image</div>', unsafe_allow_html=True)
 st.info(
     "Upload **one microscopy image** of the cancer cell sample.  \n"
     "LUMIMAP will automatically separate it into DAPI / Tubulin / Actin channels "
@@ -416,7 +438,7 @@ if uploaded:
     st.image(base, caption=f"Uploaded image  ({base.shape[1]} × {base.shape[0]} px)",
              use_container_width=False, width=320, clamp=True)
 
-    if st.button("🔬  EXECUTE RESISTANCE MAPPING", use_container_width=True):
+    if st.button("🔬  Step 3 — Execute Resistance Mapping", use_container_width=True, type="primary"):
         with st.spinner("Running full AI analysis…"):
             results = analyse(base, drug, moa, conc)
             fig     = create_full_figure(results)

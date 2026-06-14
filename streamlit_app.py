@@ -381,7 +381,7 @@ st.markdown("""
 <div class="header">
     <h1>🔬 LUMIMAP</h1>
     <p>AI-Powered Cancer Drug Resistance Detection from Cell Microscopy Images</p>
-    <div class="badge">🏆 ILC Science Fair Finalists — Harshini Dasari &amp; Ashwini Chandrashekaran</div>
+    <div class="badge">Harshini Dasari &amp; Ashwini Chandrashekaran</div>
 </div>
 """, unsafe_allow_html=True)
 

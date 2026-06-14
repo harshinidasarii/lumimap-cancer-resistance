@@ -127,7 +127,7 @@ MOA_CHANNEL_WEIGHTS = {
 # ─────────────────────────────────────────────────────────
 # IMAGE LOADING
 # ─────────────────────────────────────────────────────────
-def open_channel_image(file_obj) -> np.ndarray | None:
+def open_channel_image(file_obj):
     """Load any image file → normalized 2-D float32 array."""
     try:
         img = Image.open(file_obj)

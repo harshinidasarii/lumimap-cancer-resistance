@@ -381,7 +381,7 @@ st.markdown("""
 <div class="header">
     <h1>🔬 LUMIMAP</h1>
     <p>AI-Powered Cancer Drug Resistance Detection from Cell Microscopy Images</p>
-    <div class="badge">🏆 ILC Science Fair Finalist — Harshini Dasari</div>
+    <div class="badge">🏆 ILC Science Fair Finalists — Harshini Dasari &amp; Ashwini Chandrashekaran</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -471,6 +471,6 @@ st.markdown("---")
 st.markdown("""
 <div style="text-align:center; color:#60a5fa; font-size:0.9rem; padding:1rem 0;">
     <strong>🔬 LUMIMAP</strong> · Morphological AI for Cancer Drug Resistance · BBBC021 Dataset<br>
-    Developed by <strong>Harshini Dasari</strong> · For research and educational purposes only
+    Developed by <strong>Harshini Dasari &amp; Ashwini Chandrashekaran</strong> · For research and educational purposes only
 </div>
 """, unsafe_allow_html=True)

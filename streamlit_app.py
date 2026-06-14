@@ -400,8 +400,8 @@ def _logo_b64():
 
 st.markdown("""
 <div class="header">
-    <img src="data:image/png;base64,{LOGO_B64}" style="height:110px; margin-bottom:0.8rem;" />
     <h1>THE LUMI MAP</h1>
+    <img src="data:image/png;base64,{LOGO_B64}" style="height:220px; margin-top:1rem; margin-bottom:0.5rem;" />
     <p>AI-Powered Cancer Drug Resistance Detection from Cell Microscopy Images</p>
     <div class="badge">Harshini Dasari &amp; Ashwini Chandrashekaran</div>
 </div>

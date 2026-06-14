@@ -1,0 +1,69 @@
+{
+  "drug": "cytochalasin B",
+  "concentration": "10 nM",
+  "expected_moa": "Actin disruptors",
+  "predicted_moa": "PKC activators",
+  "predicted_confidence": 0.9999998807907104,
+  "expected_moa_probability": 3.120420188906792e-08,
+  "resistance_score": 99.99999687957981,
+  "resistance_type": "Complete Resistance",
+  "resistance_mechanism": "Multi-mechanism Resistance (target mutation or efflux pump)",
+  "explanation": "Cells display Multi-mechanism Resistance (target mutation or efflux pump) - morphological analysis indicates specific resistance pathway",
+  "top3_predictions": [
+    [
+      "PKC activators",
+      0.9999998807907104
+    ],
+    [
+      "Microtubule stabilizers",
+      1.408704548566675e-07
+    ],
+    [
+      "Eg5 inhibitors",
+      4.036013834252117e-08
+    ]
+  ],
+  "recommendations": [
+    {
+      "drug": "cisplatin",
+      "moa": "DNA damage",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "paclitaxel",
+      "moa": "Microtubule stabilizers",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "doxorubicin",
+      "moa": "DNA damage",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "gemcitabine",
+      "moa": "DNA replication",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    },
+    {
+      "drug": "bortezomib",
+      "moa": "Protein degradation",
+      "score": 1.0,
+      "rationale": "Different mechanism from Actin disruptors"
+    }
+  ],
+  "morphology_features": {
+    "elongation": -0.14072426955595632,
+    "circularity": 0.45551253931461644,
+    "compactness": 0.19363466666666668,
+    "cell_separation": 1.3146469758672163,
+    "morphology_type": "epithelial",
+    "morphology_confidence": 0.6666666666666666,
+    "num_cells": 200,
+    "emt_score": 1,
+    "epithelial_score": 2
+  }
+}

@@ -1,6 +1,9 @@
 # Large data folder (not needed for cloud deployment)
 data/
 
+# Input TIF files (large, not needed in repo)
+input/
+
 # Python cache
 __pycache__/
 *.py[cod]

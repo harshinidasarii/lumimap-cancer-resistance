@@ -1,8 +1,5 @@
-# Data folder
+# Large data folder (not needed for cloud deployment)
 data/
-
-# Requirements
-requirements.txt
 
 # Python cache
 __pycache__/
@@ -11,9 +8,12 @@ __pycache__/
 # Virtual environment
 venv/
 ENV/
+.venv/
 
-# PyTorch models (TOO LARGE)
-outputs/*.pth
+# PyTorch model checkpoints (large — excluded from git)
+output/
+outputs/
+output1/
 *.pth
 
 # macOS
@@ -21,3 +21,6 @@ outputs/*.pth
 
 # Logs
 *.log
+
+# Secrets
+.env

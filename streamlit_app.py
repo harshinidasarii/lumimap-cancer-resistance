@@ -391,7 +391,7 @@ def create_full_figure(r):
 import base64, os
 
 def _logo_b64():
-    logo_path = os.path.join(os.path.dirname(__file__), "assets", "logo.png")
+    logo_path = os.path.join(os.path.dirname(__file__), "assets", "LumiMap-Logo.png")
     if os.path.exists(logo_path):
         with open(logo_path, "rb") as f:
             return base64.b64encode(f.read()).decode()
